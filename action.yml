@@ -1,0 +1,43 @@
+name: "leafparity"
+description: "Prove that a converted ONNX tree-ensemble model is equivalent to the original, or show exactly where it is not."
+branding:
+  icon: "check-circle"
+  color: "green"
+inputs:
+  original:
+    description: "Path to the original model (XGBoost .json/.ubj, LightGBM .txt, or pickled estimator)"
+    required: true
+  converted:
+    description: "Path to the converted .onnx model"
+    required: true
+  input-dtype:
+    description: "Precision of the feature values fed in production: float64 or float32"
+    default: "float64"
+  background:
+    description: "Optional sample of real inputs (.csv/.npy/.parquet)"
+    default: ""
+  no-missing:
+    description: "Set to 'true' if inputs never contain missing values"
+    default: "false"
+  fail-above:
+    description: "Only fail if the proven max raw difference exceeds this value"
+    default: ""
+  report:
+    description: "Where to write the JSON report"
+    default: "leafparity-report.json"
+  extras:
+    description: "pip extras to install (all, xgboost, lightgbm, sklearn)"
+    default: "all"
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      run: pip install "leafparity[${{ inputs.extras }}]"
+    - shell: bash
+      run: |
+        args=(check "${{ inputs.original }}" "${{ inputs.converted }}" --input-dtype "${{ inputs.input-dtype }}" --json "${{ inputs.report }}")
+        if [ -n "${{ inputs.background }}" ]; then args+=(--background "${{ inputs.background }}"); fi
+        if [ "${{ inputs.no-missing }}" = "true" ]; then args+=(--no-missing); fi
+        if [ -n "${{ inputs.fail-above }}" ]; then args+=(--fail-above "${{ inputs.fail-above }}"); fi
+        leafparity "${args[@]}" | tee leafparity-report.txt
+        exit ${PIPESTATUS[0]}

@@ -1,0 +1,61 @@
+Test-set comparison (what the tutorial does): max |difference| = 155.52
+
+==============================================================================
+leafparity 0.1.0 - equivalence report
+==============================================================================
+Original : scikit-learn StandardScaler -> DecisionTreeRegressor, 1 trees
+Converted: ONNX TreeEnsembleRegressor (1 trees, post_transform=NONE, input float32)
+Domain   : every float32 input vector (10 features), no missing values
+
+VERDICT: NOT EQUIVALENT
+Not equivalent: 10 distinct problem(s) at 362 place(s) in the trees. For some
+    inputs the raw outputs differ by 555.835 (proven to be the largest
+    possible difference).
+
+Self-check (exact model vs. real runtimes; inputs constructed to reach every split node, on and beside its boundary):
+  original : 5620 tree decisions, 0 mismatches
+  converted: 5620 tree decisions, 0 mismatches
+Examined : 10754 joint regions; 615 of 905 matched split nodes have different exact rules
+Cross-check: 4000 boundary inputs run through both real runtimes, max |raw diff| 236.29, all within proven bounds
+
+PROBLEMS (largest effect first; 10 problem(s), 362 place(s) in the trees)
+------------------------------------------------------------------------------
+#1  a narrow band of values next to a threshold is routed differently
+    (threshold or input rounded to lower precision)  [feature 'f3']
+    occurs at 72 split node(s) in 1 tree(s); largest effect of a single tree: 555.835
+    example - tree 0:
+      original  node 1442: float32(x) <= -1.0622187554836273 (double) -> left, missing -> right
+      converted node 1442: x <= -1.0622187852859497 (float32) -> true branch, missing -> false branch
+      inputs routed differently here: [-8.5, -8.5] (1 representable value)
+    witness: {f3=-8.5, f0=1.0, f1=5.0, f2=-2.0, f4=4.0, f5=-26.0, f6=135.0, f7=-114.0, ... (2 more)}
+      original predicts 413.213; converted predicts -142.622  (verified by running both real runtimes)
+
+#2  a narrow band of values next to a threshold is routed differently
+    (threshold or input rounded to lower precision)  [feature 'f8']
+    occurs at 96 split node(s) in 1 tree(s); largest effect of a single tree: 493.681
+    example - tree 0:
+      original  node 538: float32(x) <= -1.0806240439414978 (double) -> left, missing -> right
+      converted node 538: x <= -1.0806241035461426 (float32) -> true branch, missing -> false branch
+      inputs routed differently here: [-278.0, -278.0] (1 representable value)
+    witness: {f8=-278.0, f0=2.0, f1=-2.0, f2=-3.0, f3=-15.0, f4=-24.0, f5=47.0, f6=204.0, ... (2 more)}
+      original predicts -383.305; converted predicts 110.376  (verified by running both real runtimes)
+
+WORST CASE over the whole domain (raw output = prediction)
+------------------------------------------------------------------------------
+  output 0, original - converted: attained 555.835, guaranteed <= 555.835 (proven maximum)
+  output 0, converted - original: attained 493.681, guaranteed <= 493.681 (proven maximum)
+  input attaining the largest difference:
+    witness: {f0=0.0, f1=3.509999990463257, f2=0.0, f3=-8.5, f4=0.0, f5=-20.5, f6=135.0, f7=1.5, ... (2 more)}
+      original predicts 413.213; converted predicts -142.622  (verified by running both real runtimes)
+
+
+NOTES
+  - preprocessing modelled exactly: StandardScaler
+
+Completed in 0.8s.
+Tutorial's fix, float32 inputs, missing values excluded: EQUIVALENT - Equivalent on the whole analysed input domain: the two models take corresponding paths for every possible input, and their raw outputs differ by at most 0.000111 (floating-point rounding of leaf values and sums).
+
+Tutorial's fix, float64 inputs, missing values excluded: NOT EQUIVALENT - Not equivalent: 10 distinct problem(s) at 905 place(s) in the trees. For some inputs the raw outputs differ by 565.348 (proven to be the largest possible difference).
+
+Tutorial's fix, float32 inputs, missing values allowed: NOT EQUIVALENT - Not equivalent: 10 distinct problem(s) at 225 place(s) in the trees. For some inputs the raw outputs differ by 720.826 (proven to be the largest possible difference).
+

@@ -1,0 +1,51 @@
+==============================================================================
+leafparity 0.1.0 - equivalence report
+==============================================================================
+Original : scikit-learn RandomForestClassifier, 50 trees
+Converted: ONNX TreeEnsembleClassifier (50 trees, post_transform=NONE, input float32)
+Domain   : every float64 input vector (6 features), including missing values (NaN)
+
+VERDICT: NOT EQUIVALENT
+Not equivalent: 6 distinct problem(s) at 910 place(s) in the trees. For some
+    inputs the raw outputs differ by 0.980574 (proven to be the largest
+    possible difference); the predicted class changes for at least one input.
+
+Self-check (exact model vs. real runtimes; inputs constructed to reach every split node, on and beside its boundary):
+  original : 1160800 tree decisions, 0 mismatches
+  converted: 1160800 tree decisions, 0 mismatches
+Examined : 17369 joint regions; 1818 of 3989 matched split nodes have different exact rules
+Cross-check: 4000 boundary inputs run through both real runtimes, max |raw diff| 0.952874, all within proven bounds
+
+PROBLEMS (largest effect first; 6 problem(s), 910 place(s) in the trees)
+------------------------------------------------------------------------------
+#1  missing values (NaN) are sent down a different branch  [feature 'f0']
+    occurs at 120 split node(s) in 50 tree(s); largest effect of a single tree: 0.02
+    example - tree 3:
+      original  node 60: float32(x) <= 0.1483720988035202 (double) -> left, missing -> left
+      converted node 60: x <= 0.1483720988035202 (float32) -> true branch, missing -> false branch
+      inputs routed differently here: missing (NaN) only
+    witness: {f0=NaN, f1=1.9875098319889204, f2=2.9, f3=0.562630255206262, f4=0.9421232775889631, f5=0.37772556403986696}
+      original P = [0.207175, 0.792825] -> class 1; converted P = [0.0602209, 0.939779] -> class 1
+      (verified by running both real runtimes)
+
+#2  missing values (NaN) are sent down a different branch  [feature 'f5']
+    occurs at 136 split node(s) in 49 tree(s); largest effect of a single tree: 0.02
+    example - tree 0:
+      original  node 141: float32(x) <= 1.1464885473251343 (double) -> left, missing -> left
+      converted node 141: x <= 1.1464885473251343 (float32) -> true branch, missing -> false branch
+      inputs routed differently here: missing (NaN) only
+    witness: {f5=NaN, f0=0.432, f1=0.5811181041963531, f2=0.36457239618607573, f3=0.294132496655526, f4=0.02842224131579679}
+      original P = [0.0493425, 0.950658] -> class 1; converted P = [0.11156, 0.88844] -> class 1
+      (verified by running both real runtimes)
+
+WORST CASE over the whole domain (raw output = probability of class 1)
+------------------------------------------------------------------------------
+  output 0, original - converted: attained 0.235695, guaranteed <= 0.741022 (true maximum lies between these two values)
+  output 0, converted - original: attained 0.980574, guaranteed <= 0.980574 (proven maximum)
+  input attaining the largest difference:
+    witness: {f0=NaN, f1=NaN, f2=1.1, f3=1.9, f4=-2.17, f5=1.61}
+      original P = [0.980574, 0.019426] -> class 0; converted P = [4.17233e-07, 1] -> class 1   << CLASS FLIPS
+      (verified by running both real runtimes)
+
+
+Completed in 30.8s.

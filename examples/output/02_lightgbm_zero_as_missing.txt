@@ -1,0 +1,61 @@
+Random test set, max |difference|: 3.637473074036279e-05 
+
+==============================================================================
+leafparity 0.1.0 - equivalence report
+==============================================================================
+Original : LightGBM regression, 30 trees
+Converted: ONNX TreeEnsembleRegressor (30 trees, post_transform=NONE, input float32)
+Domain   : every float64 input vector (4 features), including missing values (NaN)
+
+VERDICT: NOT EQUIVALENT
+Not equivalent: 4 distinct problem(s) at 699 place(s) in the trees. For some
+    inputs the raw outputs differ by 295.027 (proven to be the largest
+    possible difference).
+
+Self-check (exact model vs. real runtimes; inputs constructed to reach every split node, on and beside its boundary):
+  original : 169140 tree decisions, 0 mismatches
+  converted: 169140 tree decisions, 0 mismatches
+Examined : 2327 joint regions; 420 of 420 matched split nodes have different exact rules
+Cross-check: 4000 boundary inputs run through both real runtimes, max |raw diff| 295.027, all within proven bounds
+
+PROBLEMS (largest effect first; 4 problem(s), 699 place(s) in the trees)
+------------------------------------------------------------------------------
+#1  zero / near-zero values are handled differently  [feature 'Column_0']
+    occurs at 30 split node(s) in 30 tree(s); largest effect of a single tree: 22.6357
+    example - tree 2:
+      original  node 0: x <= -17.066402760988257 (double) -> left, missing_type=Zero, default -> left
+      converted node 0: x <= -17.066402435302734 (float32) -> true branch, missing -> true branch
+      inputs routed differently here: [-1.0000000180025095e-35, 1.0000000180025095e-35]
+    witness: {Column_0=0.0, Column_1=114.41658720372287, Column_2=-32.54228368678243, Column_3=77.38065867276615}
+      original predicts -198.276; converted predicts 54.7198  (verified by running both real runtimes)
+
+#2  a narrow band of values next to a threshold is routed differently
+    (threshold or input rounded to lower precision)  [feature 'Column_1']
+    occurs at 321 split node(s) in 30 tree(s); largest effect of a single tree: 13.908
+    example - tree 1:
+      original  node 5: x <= 13.677535948104364 (double) -> left, missing_type=Zero, default -> left
+      converted node 3: x <= 13.677536010742188 (float32) -> true branch, missing -> true branch
+      inputs routed differently here: [13.677535948104365, 13.677536487579346]
+    witness: {Column_1=13.677536, Column_0=-140.04134038437394, Column_2=1.4951829987135528, Column_3=32.67159033813245}
+      original predicts -116.898; converted predicts -130.806  (verified by running both real runtimes)
+
+#3  a narrow band of values next to a threshold is routed differently
+    (threshold or input rounded to lower precision)  [feature 'Column_0']
+    occurs at 216 split node(s) in 30 tree(s); largest effect of a single tree: 13.5967
+    example - tree 0:
+      original  node 0: x <= 2.6581008889579 (double) -> left, missing_type=Zero, default -> left
+      converted node 0: x <= 2.6581008434295654 (float32) -> true branch, missing -> true branch
+      inputs routed differently here: [2.6581008889579003, 2.6581009626388545]
+    witness: {Column_0=2.6581009, Column_1=18.803508698068597, Column_2=33.057100813532614, Column_3=41.05039129702629}
+      original predicts 17.9377; converted predicts 4.34092  (verified by running both real runtimes)
+
+WORST CASE over the whole domain (raw output = raw score (raw_score=True))
+------------------------------------------------------------------------------
+  output 0, original - converted: attained 56.3395, guaranteed <= 56.3395 (true maximum lies between these two values)
+  output 0, converted - original: attained 295.027, guaranteed <= 295.027 (proven maximum)
+  input attaining the largest difference:
+    witness: {Column_0=0.0, Column_1=0.0, Column_2=1.431792465466717, Column_3=-2.2678489107779773}
+      original predicts -297.963; converted predicts -2.93563  (verified by running both real runtimes)
+
+
+Completed in 0.8s.

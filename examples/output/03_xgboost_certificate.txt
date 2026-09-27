@@ -1,0 +1,25 @@
+==============================================================================
+leafparity 0.1.0 - equivalence report
+==============================================================================
+Original : XGBoost binary:logistic, 200 trees
+Converted: ONNX TreeEnsembleClassifier (200 trees, post_transform=LOGISTIC, input float32)
+Domain   : every float64 input vector (8 features), including missing values (NaN)
+
+VERDICT: EQUIVALENT
+Equivalent on the whole analysed input domain: the two models take
+    corresponding paths for every possible input, and their raw outputs differ
+    by at most 0.000471 (floating-point rounding of leaf values and sums).
+
+Self-check (exact model vs. real runtimes; inputs constructed to reach every split node, on and beside its boundary):
+  original : 2278400 tree decisions, 0 mismatches
+  converted: 2278400 tree decisions, 0 mismatches
+Examined : 1931 joint regions; 0 of 1731 matched split nodes have different exact rules
+Cross-check: 4000 boundary inputs run through both real runtimes, max |raw diff| 8.58307e-06, all within proven bounds
+
+WORST CASE over the whole domain (raw output = margin (output_margin=True))
+------------------------------------------------------------------------------
+  output 0, original - converted: attained 5.02914e-08, guaranteed <= 5.02914e-08 (proven maximum)
+  output 0, converted - original: attained -5.02914e-08, guaranteed <= -5.02914e-08 (proven maximum)
+
+
+Completed in 2.0s.
