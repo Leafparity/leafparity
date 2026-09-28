@@ -23,29 +23,31 @@ precision. The result is one of two things:
   You also get the largest difference found anywhere and a proven upper bound.
 
 ```
-$ leafparity check model.txt model.onnx --background sample.csv
+$ leafparity check model.txt model.onnx
 
 VERDICT: NOT EQUIVALENT
-Not equivalent: 4 distinct problem(s) at 420 place(s) in the trees. For some
-    inputs the raw outputs differ by 290.952 (proven to be the largest possible
+Not equivalent: 4 distinct problem(s) at 699 place(s) in the trees. For some
+    inputs the raw outputs differ by 295.027 (proven to be the largest possible
     difference).
 
-#1  zero / near-zero values are handled differently  [feature 'age']
-    occurs at 30 split node(s) in 29 tree(s); largest effect of a single tree: 23.02
-    example - tree 3:
+#1  zero / near-zero values are handled differently  [feature 'Column_0']
+    occurs at 30 split node(s) in 30 tree(s); largest effect of a single tree: 22.6357
+    example - tree 2:
       original  node 0: x <= -17.066402760988257 (double), missing_type=Zero, default -> left
       converted node 0: x <= -17.066402435302734 (float32), missing -> true branch
       inputs routed differently here: [-1.0000000180025095e-35, 1.0000000180025095e-35]
-    witness: {age=0.0, income=114.41658720372287, ...}
-      original predicts -196.355; converted predicts 57.9331  (verified by running both real runtimes)
+    witness: {Column_0=0.0, Column_1=114.41658720372287, ...}
+      original predicts -198.276; converted predicts 54.7198  (verified by running both real runtimes)
 ```
+
+*(Real output of `examples/02_lightgbm_zero_as_missing.py`, reproduced exactly — run it yourself to check.)*
 
 ## What it catches (real examples, reproduced in `examples/`)
 
 | Case | What leafparity reports |
 |---|---|
-| The sklearn-onnx documentation's own "Issues when switching to float" example (StandardScaler + DecisionTreeRegressor) | The tutorial's test set shows a largest error of about 190. leafparity proves the largest possible error is **556** (721 with missing values), shows where each discrepancy is, and certifies the tutorial's `CastTransformer` fix as **EQUIVALENT** for float32 inputs without NaN. It also shows the fix does *not* hold for float64 inputs. |
-| LightGBM trained with `zero_as_missing=True`, converted with onnxmltools | The converter ignores LightGBM's `missing_type=Zero`, so an input of exactly `0.0` takes a different path in every tree. Raw scores differ by up to ~290. |
+| The sklearn-onnx documentation's own "Issues when switching to float" example (StandardScaler + DecisionTreeRegressor) | The tutorial's test set shows a largest error of about 156. leafparity proves the largest possible error is **556** (721 with missing values), shows where each discrepancy is, and certifies the tutorial's `CastTransformer` fix as **EQUIVALENT** for float32 inputs without NaN. It also shows the fix does *not* hold for float64 inputs. |
+| LightGBM trained with `zero_as_missing=True`, converted with onnxmltools | The converter ignores LightGBM's `missing_type=Zero`, so an input of exactly `0.0` takes a different path in every tree. Raw scores differ by up to ~295. |
 | scikit-learn trees (>= 1.3) that receive NaN, converted with skl2onnx | scikit-learn routes NaN with `missing_go_to_left`, but the converted model sends NaN the other way at the affected nodes. |
 | LightGBM (double thresholds) served through float32 ONNX | Narrow bands of float64 inputs next to thresholds are routed differently at almost every node. leafparity lists them and bounds their effect. With `--input-dtype float32` it tells you whether your float32 data can hit them at all. |
 
