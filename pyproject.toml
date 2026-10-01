@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Exact equivalence checking for tree-ensemble models converted to ONNX: finds every input where the deployed model disagrees with the original, and proves the rest."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "Proprietary" }
+license = { text = "Apache-2.0" }
 dependencies = ["numpy>=1.23", "onnx>=1.14", "onnxruntime>=1.15"]
 
 [project.optional-dependencies]
