@@ -32,7 +32,7 @@ runs:
   using: "composite"
   steps:
     - shell: bash
-      run: pip install "leafparity[${{ inputs.extras }}]"
+      run: pip install "${{ github.action_path }}[${{ inputs.extras }}]"
     - shell: bash
       run: |
         args=(check "${{ inputs.original }}" "${{ inputs.converted }}" --input-dtype "${{ inputs.input-dtype }}" --json "${{ inputs.report }}")
