@@ -54,7 +54,7 @@ Not equivalent: 4 distinct problem(s) at 699 place(s) in the trees. For some
 ## Install
 
 ```
-pip install "leafparity[all] @ git+https://github.com/Leafparity/leafparity.git"
+pip install leafparity[all]
 # or [xgboost], [lightgbm], [sklearn] instead of [all]
 ```
 
