@@ -90,6 +90,19 @@ class Model:
     def n_nodes(self) -> int:
         return sum(t.n_nodes for t in self.trees)
 
+    def map_columns_to_inputs(self, source: np.ndarray, n_inputs: int) -> None:
+        """The trees see column ``k`` of the preprocessed data, computed from the user's
+        input column ``source[k]``. Make every node's feature that input column (the
+        domain, pairing and reports all work on user inputs); the router keeps looking
+        its preprocessing constants up by the tree's own column."""
+        src = np.asarray(source, dtype=np.int64)
+        r = self.router
+        r.chain_feature = r.feature.copy()
+        r.feature = np.where(r.feature >= 0, src[np.maximum(r.feature, 0)], -1)
+        for t in self.trees:
+            t.feature = np.where(t.feature >= 0, src[np.maximum(t.feature, 0)], -1)
+        self.n_features = int(n_inputs)
+
     def summary(self) -> Dict[str, Any]:
         return {
             "library": self.library,

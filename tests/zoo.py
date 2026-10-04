@@ -126,9 +126,34 @@ def booster_pipeline_models():
     return out
 
 
+def column_pipeline_models():
+    """ColumnTransformers of scalers and 'passthrough' on whole columns, converted by skl2onnx
+    (ArrayFeatureExtractor + Scaler / Mul / Add + Concat in front of the trees)."""
+    from lightgbm import LGBMClassifier
+    from skl2onnx import to_onnx
+    from sklearn.compose import ColumnTransformer
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
+    from test_pipelines import register_booster_converters
+    register_booster_converters()
+    X, Xn, y, yb, ym = data()
+    x32 = X[:1].astype(np.float32)
+    ct = ColumnTransformer([("std", StandardScaler(), [0, 2]), ("mm", MinMaxScaler(), [4])],
+                           remainder="passthrough")
+    p1 = Pipeline([("columns", ct), ("model", RandomForestRegressor(6, max_depth=5, random_state=0))]).fit(Xn, y)
+    ct = ColumnTransformer([("rob", RobustScaler(), [3, 1]), ("keep", "passthrough", [4])], remainder="drop")
+    est = LGBMClassifier(n_estimators=12, num_leaves=7, verbose=-1)
+    p2 = Pipeline([("columns", ct), ("model", est)]).fit(Xn, yb)
+    return [("pipe_ct_rf", p1, to_onnx(p1, x32)),
+            ("pipe_ct_drop_lgb", p2, to_onnx(p2, x32, options={id(est): {"zipmap": False}},
+                                             target_opset={"": 15, "ai.onnx.ml": 3}))]
+
+
 @functools.lru_cache(maxsize=None)
 def all_models():
-    return tuple(xgb_models() + lgb_models() + sk_models() + booster_pipeline_models())
+    return tuple(xgb_models() + lgb_models() + sk_models() + booster_pipeline_models()
+                 + column_pipeline_models())
 
 
 def by_name(name):

@@ -297,3 +297,63 @@ def test_booster_pipeline_from_the_command_line(library, tmp_path):
     r = subprocess.run(EXE + [str(tmp_path / "p.joblib"), str(tmp_path / "p.onnx"), "--quiet"],
                        capture_output=True, text=True)
     assert r.returncode == {"EQUIVALENT": 0, "NOT EQUIVALENT": 1}[a.verdict["status"]], r.stdout + r.stderr
+
+
+# --------------------------------------------------------------------------- ColumnTransformer
+def _column_pipeline(kind):
+    from sklearn.compose import ColumnTransformer
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import MinMaxScaler, StandardScaler
+    if kind == "scaler+passthrough":
+        ct = ColumnTransformer([("num", StandardScaler(), [0, 2])], remainder="passthrough")
+        return Pipeline([("columns", ct), ("model", RandomForestClassifier(8, max_depth=5, random_state=0))])
+    # different arithmetic per column group, reordered columns, one column dropped
+    ct = ColumnTransformer([("std", StandardScaler(), [3]), ("mm", MinMaxScaler(), [1]),
+                            ("keep", "passthrough", [0])], remainder="drop")
+    return Pipeline([("columns", ct), ("model", _booster("xgboost"))])
+
+
+@pytest.mark.parametrize("udt", ["float64", "float32"])
+@pytest.mark.parametrize("kind", [pytest.param("scaler+passthrough", marks=needs_sklearn),
+                                  pytest.param("mixed+drop", marks=needs_xgboost)])
+def test_column_transformer(kind, udt):
+    X, Xn, y = _data(seed=2)
+    p = _column_pipeline(kind).fit(Xn, y)
+    onx = _to_onnx(p, X)
+    a = analyze(p, onx, input_dtype=udt, background=Xn[:300])
+    assert "ColumnTransformer" in a.original.description
+    assert a.original.n_features == a.converted.n_features == 4
+    used = {int(f) for t in a.original.trees for f in t.feature if f >= 0}
+    if kind == "mixed+drop":
+        assert 2 not in used  # the dropped input column reaches no tree
+    assert_exact_against_real_runtimes(a, p, onx, udt)
+    # a problem's feature is an input column of the Pipeline, and its witness shows it
+    for f in a.findings:
+        if f["feature"] is not None:
+            assert f["feature_name"] == f"f{f['feature']}"
+
+
+@needs_sklearn
+def test_preprocessing_that_is_not_reproduced_bit_for_bit_is_refused(monkeypatch):
+    """Both sides' modelled preprocessing is checked against the real thing (the Pipeline's
+    transform steps, the ONNX preprocessing nodes run by onnxruntime). A model that does
+    not match bit for bit is refused, never analysed: here a column-order bug is injected."""
+    from leafparity.ir import UnsupportedModelError
+    from leafparity.loaders import columns, load_onnx, load_original
+    X, Xn, y = _data(seed=2)
+    p = _column_pipeline("scaler+passthrough").fit(Xn, y)
+    onx = _to_onnx(p, X)
+    load_original(p)
+    load_onnx(onx)
+    concat = columns.Columns.concat
+
+    def swapped(parts, dtype):
+        c = concat(parts, dtype)
+        c.src[0], c.src[1] = c.src[1], c.src[0]
+        return c
+    monkeypatch.setattr(columns.Columns, "concat", staticmethod(swapped))
+    with pytest.raises(UnsupportedModelError, match="bit for bit"):
+        load_original(p)
+    with pytest.raises(UnsupportedModelError, match="bit for bit"):
+        load_onnx(onx)
