@@ -357,3 +357,133 @@ def test_preprocessing_that_is_not_reproduced_bit_for_bit_is_refused(monkeypatch
         load_original(p)
     with pytest.raises(UnsupportedModelError, match="bit for bit"):
         load_onnx(onx)
+
+
+# --------------------------------------------------------------------------- refused
+def _refused_pipeline(case):
+    from sklearn.compose import ColumnTransformer
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler
+    forest = RandomForestClassifier(5, max_depth=4, random_state=0)
+    if case == "imputer":
+        return Pipeline([("impute", SimpleImputer()), ("model", forest)]), ["'impute'", "SimpleImputer"]
+    if case == "one-hot":
+        return Pipeline([("encode", OneHotEncoder(handle_unknown="ignore")), ("model", forest)]), \
+            ["'encode'", "OneHotEncoder"]
+    if case == "one-hot-column":
+        ct = ColumnTransformer([("category", OneHotEncoder(handle_unknown="ignore"), [0]),
+                                ("num", StandardScaler(), [1, 2])])
+        return Pipeline([("columns", ct), ("model", forest)]), ["'columns'", "'category'", "OneHotEncoder"]
+    if case == "custom":
+        from custom_steps import ClipOutliers
+        return Pipeline([("clip", ClipOutliers()), ("model", forest)]), ["'clip'", "ClipOutliers"]
+    if case == "categorical-lightgbm":  # column 0 holds categories, passed through as is
+        from lightgbm import LGBMClassifier
+        ct = ColumnTransformer([("num", StandardScaler(), [1, 2]), ("category", "passthrough", [0])])
+        est = LGBMClassifier(n_estimators=5, num_leaves=7, verbose=-1)
+        return Pipeline([("columns", ct), ("model", est)]), ["'model'", "categorical"]
+    raise KeyError(case)
+
+
+@pytest.mark.parametrize("case", [pytest.param(c, marks=needs_sklearn) for c in
+                                  ("imputer", "one-hot", "one-hot-column", "custom")]
+                         + [pytest.param("categorical-lightgbm", marks=needs_lightgbm)])
+def test_unsupported_step_exits_2_and_names_it(case, tmp_path):
+    import os
+
+    import joblib
+    import onnx
+    X, Xn, y = _data(seed=4)
+    p, names = _refused_pipeline(case)
+    Xfit = X.copy()
+    Xfit[:, 0] = np.rint(np.abs(X[:, 0]) * 2)  # a small-integer column for the categorical cases
+    if case == "categorical-lightgbm":
+        y = (np.isin(Xfit[:, 0], [1, 3]) ^ (X[:, 1] > 5)).astype(int)
+        p.fit(Xfit, y, model__categorical_feature=[2])
+        trees = p.steps[-1][1].booster_.dump_model()["tree_info"]
+        assert any('"=="' in str(t).replace("'", '"') for t in trees)  # a real categorical split
+    else:
+        p.fit(Xfit, y)
+    joblib.dump(p, tmp_path / "p.pkl")
+    # any ONNX file will do: the original is refused before the conversion is read
+    onnx.save(_to_onnx(_plain_forest(X, y), X), str(tmp_path / "c.onnx"))
+    env = dict(os.environ, PYTHONPATH=os.path.dirname(__file__))
+    for extra in ([], ["--summary"]):
+        r = subprocess.run(EXE + [str(tmp_path / "p.pkl"), str(tmp_path / "c.onnx")] + extra,
+                           capture_output=True, text=True, env=env)
+        assert r.returncode == 2, r.stdout + r.stderr
+    r = subprocess.run(EXE + [str(tmp_path / "p.pkl"), str(tmp_path / "c.onnx")],
+                       capture_output=True, text=True, env=env)
+    for name in names:
+        assert name in r.stderr, r.stderr
+
+
+def _plain_forest(X, y):
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.pipeline import Pipeline
+    return Pipeline([("model", RandomForestClassifier(3, max_depth=2, random_state=0))]).fit(X, y)
+
+
+@needs_sklearn
+def test_custom_step_that_cannot_be_unpickled_exits_2(tmp_path):
+    import joblib
+    import onnx
+    X, Xn, y = _data(seed=4)
+    p, _ = _refused_pipeline("custom")
+    joblib.dump(p.fit(X, y), tmp_path / "p.pkl")
+    onnx.save(_to_onnx(_plain_forest(X, y), X), str(tmp_path / "c.onnx"))
+    r = subprocess.run(EXE + [str(tmp_path / "p.pkl"), str(tmp_path / "c.onnx")],
+                       capture_output=True, text=True)  # custom_steps is not importable here
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "custom_steps" in r.stderr and "Traceback" not in r.stderr
+
+
+@needs_sklearn
+def test_unsupported_onnx_node_in_front_of_the_trees_exits_2(tmp_path):
+    """The original is supported, but the ONNX file has an Imputer in front of its scaler."""
+    import joblib
+    import onnx
+    from sklearn.base import clone
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+    X, Xn, y = _data(seed=5)
+    p = Pipeline([("scaler", StandardScaler()), ("model", _plain_forest(X, y).steps[-1][1])]).fit(X, y)
+    other = Pipeline([("impute", SimpleImputer()), ("scaler", clone(p.steps[0][1])),
+                      ("model", clone(p.steps[-1][1]))]).fit(X, y)
+    joblib.dump(p, tmp_path / "p.pkl")
+    onnx.save(_to_onnx(other, X), str(tmp_path / "c.onnx"))
+    r = subprocess.run(EXE + [str(tmp_path / "p.pkl"), str(tmp_path / "c.onnx")], capture_output=True, text=True)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "'Imputer'" in r.stderr, r.stderr
+
+
+@needs_xgboost
+def test_summary_on_a_pipeline_reveals_no_threshold_boundary_or_witness(tmp_path):
+    import json
+
+    import joblib
+    import onnx
+    from test_summary import _appears, _model_details
+    X, Xn, y = _data(seed=2)
+    p = _column_pipeline("mixed+drop").fit(Xn, y)
+    joblib.dump(p, tmp_path / "p.pkl")
+    onnx.save(_to_onnx(p, X), str(tmp_path / "p.onnx"))
+    full = subprocess.run(EXE + [str(tmp_path / "p.pkl"), str(tmp_path / "p.onnx"), "--json",
+                                 str(tmp_path / "full.json")], capture_output=True, text=True)
+    assert full.returncode == 1, full.stdout + full.stderr
+    details = _model_details(json.loads((tmp_path / "full.json").read_text(encoding="utf-8")))
+    assert details["threshold"] and details["witness value"]  # incl. raw boundary values
+    r = subprocess.run(EXE + [str(tmp_path / "p.pkl"), str(tmp_path / "p.onnx"), "--summary", "--json",
+                              str(tmp_path / "summary.json")], capture_output=True, text=True)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "VERDICT: NOT EQUIVALENT" in r.stdout
+    stdout = r.stdout.split("Run time")[0]  # the run time is not from the model
+    summary = (tmp_path / "summary.json").read_text(encoding="utf-8").split('"run_seconds"')[0]
+    for where, text in (("stdout", stdout), ("summary JSON", summary), ("stderr", r.stderr)):
+        for category, strings in details.items():
+            leaked = sorted(s for s in strings if _appears(s, text))
+            assert not leaked, f"{where} reveals {category}: {leaked}"
+        assert "witness" not in text.lower() and "x <=" not in text and "x <" not in text

@@ -121,7 +121,9 @@ def _column_transformer(name, ct, cols: Columns, D) -> Columns:
         else:
             raise UnsupportedModelError(
                 f"pipeline step '{name}' (ColumnTransformer): transformer '{tname}' "
-                f"({type(tr).__name__}) is not supported: {_ONLY}")
+                f"({type(tr).__name__}) is not supported: inside a ColumnTransformer only "
+                "StandardScaler, MinMaxScaler, MaxAbsScaler, RobustScaler and 'passthrough' "
+                "can be analysed exactly")
         if part.n != sl.stop - sl.start:
             raise UnsupportedModelError(
                 f"pipeline step '{name}' (ColumnTransformer): transformer '{tname}' does not map "
@@ -226,7 +228,11 @@ def _load_booster_pipeline(pipeline, est, steps, user_dtype) -> Model:
         from .xgboost_loader import load_xgboost as load
     else:
         from .lightgbm_loader import load_lightgbm as load
-    m = load(est, user_dtype)
+    try:
+        m = load(est, user_dtype)
+    except UnsupportedModelError as exc:
+        raise UnsupportedModelError(
+            f"pipeline step '{pipeline.steps[-1][0]}' ({type(est).__name__}): {exc}") from exc
     n_features = int(getattr(pipeline, "n_features_in_", 0) or m.n_features)
     accepts_nan = _accepts(pipeline, n_features, np.nan)
     pre = _pipeline_chain(steps, user_dtype, n_features, accepts_nan)
@@ -278,6 +284,10 @@ def load_sklearn(obj: Any, user_dtype=np.float64) -> Model:
         scale = 1.0 / len(members)
     elif cls in ("GradientBoostingRegressor", "GradientBoostingClassifier"):
         members = None
+    elif hasattr(obj, "steps"):
+        raise UnsupportedModelError(
+            f"pipeline step '{obj.steps[-1][0]}' ({cls}) is not supported as the final estimator: "
+            "use a scikit-learn tree model, XGBoost or LightGBM")
     else:
         raise UnsupportedModelError(f"scikit-learn estimator {cls} is not supported yet")
 
