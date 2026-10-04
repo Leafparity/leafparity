@@ -104,7 +104,9 @@ def _cannot_certify_reason(exc: Exception) -> str:
         return "the model pair uses a construct leafparity does not support"
     if isinstance(exc, SelfCheckError):
         return "self-check failed: leafparity's exact model disagreed with a real runtime"
-    return "invalid input or options"
+    if isinstance(exc, ValueError):
+        return "invalid input or options"
+    return "unexpected error while analysing the model pair"
 
 
 def _emit_summary(args, d) -> None:
@@ -133,11 +135,14 @@ def main(argv=None) -> int:
                     allow_missing=not args.no_missing, include_inf=args.include_inf,
                     bounds=bounds, background=bg, feature_names=names,
                     max_findings=args.max_findings, worst_case_seconds=args.worst_case_seconds)
-    except (UnsupportedModelError, SelfCheckError, ValueError) as exc:
+    except Exception as exc:  # anything that stops the analysis means: cannot certify (exit 2)
         if args.summary:  # the message itself may name model details
             _emit_summary(args, cannot_certify_summary(_cannot_certify_reason(exc), time.time() - t0))
-        else:
+        elif isinstance(exc, (UnsupportedModelError, SelfCheckError, ValueError)):
             print(f"leafparity: cannot certify this model pair: {exc}", file=sys.stderr)
+        else:
+            print(f"leafparity: cannot certify this model pair: unexpected error "
+                  f"({type(exc).__name__}: {exc})", file=sys.stderr)
         return 2
     if args.summary:
         _emit_summary(args, summary_dict(a))

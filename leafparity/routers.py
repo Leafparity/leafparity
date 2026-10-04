@@ -31,14 +31,22 @@ class Chain:
     {'cast', 'sub', 'add', 'mul', 'div'}; ``consts`` is a per-feature array (or
     None for 'cast').  Each step is computed in ``dtype`` with IEEE semantics, exactly
     like numpy (and, verified by the test-suite, like the C/C++ runtimes).
+
+    A ``('split', groups, dtype)`` step gives groups of features their own arithmetic:
+    ``groups`` is a list of ``(features, Chain)``, every feature in exactly one group,
+    and every group's chain ends in ``dtype`` (a ColumnTransformer or an ONNX Concat).
     """
 
     def __init__(self, steps: Sequence[Tuple[str, Optional[np.ndarray], object]] = ()):
-        self.steps = [(op, None if c is None else np.asarray(c), np.dtype(dt)) for op, c, dt in steps]
+        self.steps = [(op, c if op == "split" or c is None else np.asarray(c), np.dtype(dt))
+                      for op, c, dt in steps]
 
     def apply(self, u: np.ndarray, feat: np.ndarray) -> np.ndarray:
         v = u
         for op, consts, dt in self.steps:
+            if op == "split":
+                v = self._split(np.asarray(v), np.asarray(feat), consts, dt)
+                continue
             with np.errstate(over="ignore", invalid="ignore"):
                 v = np.asarray(v).astype(dt, copy=False)
             if op == "cast":
@@ -58,12 +66,31 @@ class Chain:
             v = np.asarray(v, dtype=dt)
         return v
 
+    @staticmethod
+    def _split(v, feat, groups, dt):
+        out = np.empty(v.shape, dtype=dt)
+        done = np.zeros(v.shape, dtype=bool)
+        for features, sub in groups:
+            sel = np.isin(feat, features)
+            if sel.any():
+                r = sub.apply(v[sel], feat[sel])
+                if r.dtype != dt:  # pragma: no cover - guarded at construction
+                    raise ValueError("chain group does not end in the split dtype")
+                out[sel] = r
+            done |= sel
+        if not done.all():  # pragma: no cover - guarded at construction
+            raise ValueError("feature outside every chain group")
+        return out
+
     def describe(self) -> str:
         if not self.steps:
             return "identity"
         parts = []
         for op, c, dt in self.steps:
-            parts.append(f"cast->{dt.name}" if op == "cast" else f"{op}[{dt.name}]")
+            if op == "split":
+                parts.append("split(" + " | ".join(sub.describe() for _, sub in c) + ")")
+            else:
+                parts.append(f"cast->{dt.name}" if op == "cast" else f"{op}[{dt.name}]")
         return " , ".join(parts)
 
     def then(self, other: "Chain") -> "Chain":
@@ -80,11 +107,15 @@ class Router:
 
     def __init__(self, feature: np.ndarray, chain: Chain):
         self.feature = np.asarray(feature, dtype=np.int64)   # global node -> feature (-1 leaf)
+        # the column the tree itself sees, which picks the chain's constants; it differs
+        # from ``feature`` (the user's input column) only when preprocessing selects or
+        # reorders columns (see ir.Model.map_columns_to_inputs)
+        self.chain_feature = self.feature
         self.chain = chain
 
     def values(self, u, g):
         """Value the runtime actually compares, after all casts/preprocessing."""
-        return self.chain.apply(np.asarray(u), self.feature[g])
+        return self.chain.apply(np.asarray(u), self.chain_feature[g])
 
     def route(self, u, g) -> np.ndarray:  # pragma: no cover - abstract
         raise NotImplementedError
@@ -157,7 +188,7 @@ class LightGBMRouter(Router):
         # LightGBM's predictor turns each dense row into (index, value) pairs and keeps
         # only entries with |v| > kZeroThreshold (or NaN); everything else is read back
         # as exactly 0.0.  So |v| <= 1e-35f is snapped to zero before any comparison.
-        v = self.chain.apply(np.asarray(u), self.feature[g]).astype(np.float64)
+        v = self.chain.apply(np.asarray(u), self.chain_feature[g]).astype(np.float64)
         with np.errstate(invalid="ignore"):
             snap = np.abs(v) <= LGB_ZERO_THRESHOLD
         return np.where(snap, 0.0, v)

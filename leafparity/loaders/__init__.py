@@ -21,7 +21,12 @@ def load_original(obj: Any, user_dtype=np.float64):
         low = path.lower()
         if low.endswith((".pkl", ".pickle", ".joblib")):
             import joblib
-            return load_original(joblib.load(path), user_dtype)
+            try:
+                obj = joblib.load(path)
+            except Exception as exc:  # e.g. a custom transformer whose class is not importable
+                raise UnsupportedModelError(
+                    f"cannot load the pickled model '{path}': {type(exc).__name__}: {exc}") from exc
+            return load_original(obj, user_dtype)
         if low.endswith((".json", ".ubj", ".ubjson", ".model", ".bin")):
             from .xgboost_loader import load_xgboost
             return load_xgboost(path, user_dtype)

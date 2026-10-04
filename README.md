@@ -147,7 +147,8 @@ leafparity checks its own work at three levels. The report shows the result of e
    runtimes without using the analysis engine at all. Every observed difference must
    fall within the proven bound.
 
-The test suite (`pytest tests/`) covers 21 model families in both input precisions.
+The test suite (`pytest tests/`) covers 28 model configurations, Pipelines included,
+in both input precisions.
 It proves leaf-for-leaf agreement at every node boundary. It also injects known
 defects into ONNX models (a threshold moved by one float step, a flipped
 missing-value flag, a changed leaf weight, a changed comparison operator) and
@@ -160,15 +161,65 @@ set of affected inputs, and nothing else.
 |---|---|
 | XGBoost | `gbtree` booster, numerical splits; regression, binary, multiclass |
 | LightGBM | gbdt / rf, numerical splits, all missing-value modes (None / Zero / NaN); regression, binary, multiclass |
-| scikit-learn | DecisionTree, ExtraTree, RandomForest, ExtraTrees, GradientBoosting (regressor / classifier), optionally after StandardScaler / MinMaxScaler / MaxAbsScaler / RobustScaler / CastTransformer in a Pipeline |
+| scikit-learn | DecisionTree, ExtraTree, RandomForest, ExtraTrees, GradientBoosting (regressor / classifier) |
+| scikit-learn Pipeline | any of the above, `XGBRegressor` / `XGBClassifier` or `LGBMRegressor` / `LGBMClassifier` as the last step, after scalers, `'passthrough'` or a ColumnTransformer of them (see [Pipelines](#pipelines)) |
 
 | Converted | Details |
 |---|---|
-| ONNX | `ai.onnx.ml` TreeEnsembleRegressor / TreeEnsembleClassifier (opset <= 3), optionally after Cast / Scaler / Add / Sub / Mul / Div by constants; float or double input; as produced by skl2onnx and onnxmltools |
+| ONNX | `ai.onnx.ml` TreeEnsembleRegressor / TreeEnsembleClassifier (opset <= 3), optionally after Cast / Scaler / Add / Sub / Mul / Div by constants, and ArrayFeatureExtractor / Gather / Concat of columns; float or double input; as produced by skl2onnx and onnxmltools |
 
 Not yet supported, and refused rather than guessed: categorical splits, XGBoost
 `dart`, LightGBM linear trees, ONNX `ai.onnx.ml` opset-5 `TreeEnsemble`, PMML,
 compiled code (m2cgen, treelite) and SQL.
+
+## Pipelines
+
+`ORIGINAL` can be a fitted scikit-learn `Pipeline` saved with joblib, compared with its
+skl2onnx conversion. For an XGBoost or LightGBM last step, register the onnxmltools
+converter with skl2onnx (`update_registered_converter`) before converting.
+
+```
+leafparity check pipeline.joblib pipeline.onnx
+```
+
+Supported steps before the last one:
+
+* `StandardScaler`, `MinMaxScaler`, `RobustScaler`, `MaxAbsScaler`, `CastTransformer`
+* `'passthrough'`
+* a `ColumnTransformer` of those scalers and `'passthrough'`, each applied to whole
+  columns selected by position; other columns may be dropped
+
+The last step is a scikit-learn tree model, XGBoost or LightGBM (scikit-learn API) on
+numeric features.
+
+No threshold is moved by algebra such as `thr * scale + mean`: rounding makes that
+differ from the real runtimes for some inputs. leafparity evaluates each scaler with
+the operations, order and dtype of the runtime it models: scikit-learn's own arithmetic
+for the original, and for the ONNX file whatever the graph contains (an `ai.onnx.ml`
+Scaler computing `(x - offset) * scale` in float32, or Cast, Mul and Add nodes). The raw
+input at which a split changes side is then found by binary search over every
+representable float. NaN passes through every scaler unchanged and keeps each model's
+own routing. Before the analysis, both descriptions of the preprocessing are checked
+bit for bit against the Pipeline's real transform steps and against onnxruntime
+running the graph's own preprocessing nodes; if either does not match, the pair is
+refused.
+
+Refused with exit code 2, naming the step:
+
+* any other transformer: imputers, encoders such as `OneHotEncoder`, feature
+  selectors, a `FunctionTransformer` with a function, custom transformers (also when
+  their class cannot be imported to load the file), nested Pipelines
+* a `ColumnTransformer` containing any of those, selecting columns by name or with a
+  callable (leafparity runs the Pipeline on plain numeric arrays), or using
+  `transformer_weights`
+* categorical splits in the last step, for example LightGBM `categorical_feature`
+* in the ONNX file, any node in front of the trees other than Cast, Identity, Scaler,
+  Add / Sub / Mul / Div by a constant, ArrayFeatureExtractor / Gather of constant
+  columns and Concat
+
+In the report, features and witness inputs refer to the Pipeline's input columns. The
+threshold in a rule (`x <= ...`) is on the scaled value the tree compares, and "inputs
+routed differently" lists raw input values.
 
 ## What "raw output" means
 

@@ -1,5 +1,5 @@
-"""scikit-learn trees, forests, gradient boosting (optionally inside a Pipeline with
-monotone scalers in front) -> leafparity IR."""
+"""scikit-learn trees, forests, gradient boosting, and XGBoost / LightGBM estimators (optionally
+inside a Pipeline with monotone scalers or a ColumnTransformer of them in front) -> leafparity IR."""
 from __future__ import annotations
 
 from typing import Any, Tuple
@@ -8,6 +8,7 @@ import numpy as np
 
 from ..ir import Model, Tree, UnsupportedModelError
 from ..routers import Chain, SklearnRouter
+from .columns import Columns
 
 
 def _step_variants(ops, D):
@@ -41,48 +42,156 @@ def _calibrate(tr, variants, D, n_features):
         "scikit-learn version, so it cannot be analysed exactly")
 
 
-def _preprocessing_steps(steps, user_dtype, n_features) -> Tuple[list, list]:
-    """Translate supported per-feature monotone transformers into Chain steps whose
-    arithmetic is calibrated to match the installed scikit-learn bit-for-bit."""
-    out: list = []
+_SCALERS = ("StandardScaler", "MinMaxScaler", "MaxAbsScaler", "RobustScaler")
+_ONLY = ("only StandardScaler, MinMaxScaler, MaxAbsScaler, RobustScaler, CastTransformer, "
+         "'passthrough' and a ColumnTransformer of those scalers and 'passthrough' can be "
+         "analysed exactly")
+
+
+def _is_identity(tr) -> bool:
+    """'passthrough' (a fitted ColumnTransformer stores it as FunctionTransformer(func=None))."""
+    if tr is None or (isinstance(tr, str) and tr == "passthrough"):
+        return True
+    return type(tr).__name__ == "FunctionTransformer" and getattr(tr, "func", 0) is None
+
+
+def _scaler_ops(tr) -> list:
+    """The in-place operations a fitted scaler performs, in order, with its float64 constants."""
+    cls = type(tr).__name__
+    ops = []
+    if cls == "StandardScaler":
+        if getattr(tr, "with_mean", True) and tr.mean_ is not None:
+            ops.append(("sub", np.asarray(tr.mean_, np.float64)))
+        if getattr(tr, "with_std", True) and tr.scale_ is not None:
+            ops.append(("div", np.asarray(tr.scale_, np.float64)))
+    elif cls == "MinMaxScaler":
+        if getattr(tr, "clip", False):
+            raise UnsupportedModelError("MinMaxScaler(clip=True) is not supported yet")
+        ops = [("mul", np.asarray(tr.scale_, np.float64)), ("add", np.asarray(tr.min_, np.float64))]
+    elif cls == "MaxAbsScaler":
+        ops = [("div", np.asarray(tr.scale_, np.float64))]
+    elif cls == "RobustScaler":
+        if getattr(tr, "with_centering", True) and tr.center_ is not None:
+            ops.append(("sub", np.asarray(tr.center_, np.float64)))
+        if getattr(tr, "with_scaling", True) and tr.scale_ is not None:
+            ops.append(("div", np.asarray(tr.scale_, np.float64)))
+    return ops
+
+
+def _calibrated(tr, D, n) -> list:
+    ops = _scaler_ops(tr)
+    return _calibrate(tr, _step_variants(ops, D), D, n) if ops else []
+
+
+def _column_selection(name, ct, tname, columns, n) -> list:
+    if callable(columns) or isinstance(columns, str) or np.asarray(columns).dtype.kind in "OUS":
+        raise UnsupportedModelError(
+            f"pipeline step '{name}' (ColumnTransformer): transformer '{tname}' selects columns "
+            "by name or by a callable; leafparity runs the Pipeline on plain numeric arrays, so "
+            "select the columns by position")
+    known = getattr(ct, "_transformer_to_input_indices", None)
+    if known is not None and tname in known:
+        return [int(i) for i in known[tname]]
+    return [int(i) for i in np.atleast_1d(np.arange(n)[columns])]
+
+
+def _column_transformer(name, ct, cols: Columns, D) -> Columns:
+    """A ColumnTransformer of scalers and 'passthrough' on whole columns: each output
+    column is one input column, with that transformer's own calibrated arithmetic."""
+    if getattr(ct, "transformer_weights", None):
+        raise UnsupportedModelError(
+            f"pipeline step '{name}' (ColumnTransformer) uses transformer_weights, which is not supported")
+    if getattr(ct, "sparse_output_", False):
+        raise UnsupportedModelError(f"pipeline step '{name}' (ColumnTransformer) has sparse output")
+    out_idx = getattr(ct, "output_indices_", None)
+    if out_idx is None:  # pragma: no cover - scikit-learn < 1.0
+        raise UnsupportedModelError(
+            f"pipeline step '{name}' (ColumnTransformer): this scikit-learn version does not "
+            "record its output columns")
+    placed = []
+    for tname, tr, columns in ct.transformers_:
+        sl = out_idx.get(tname)
+        if sl is None or sl.stop <= sl.start:  # 'drop', or no columns
+            continue
+        part = cols.select(_column_selection(name, ct, tname, columns, cols.n))
+        if _is_identity(tr):
+            pass
+        elif type(tr).__name__ in _SCALERS:
+            part.apply(_calibrated(tr, D, part.n))
+        else:
+            raise UnsupportedModelError(
+                f"pipeline step '{name}' (ColumnTransformer): transformer '{tname}' "
+                f"({type(tr).__name__}) is not supported: inside a ColumnTransformer only "
+                "StandardScaler, MinMaxScaler, MaxAbsScaler, RobustScaler and 'passthrough' "
+                "can be analysed exactly")
+        if part.n != sl.stop - sl.start:
+            raise UnsupportedModelError(
+                f"pipeline step '{name}' (ColumnTransformer): transformer '{tname}' does not map "
+                "its columns one to one")
+        placed.append((sl.start, part))
+    placed.sort(key=lambda sp: sp[0])
+    width = 0
+    for start, part in placed:
+        if start != width:
+            raise UnsupportedModelError(f"pipeline step '{name}' (ColumnTransformer): output columns overlap")
+        width += part.n
+    parts = [p for _, p in placed]
+    dtype = np.result_type(*[p.dtype for p in parts]) if parts else D
+    return Columns.concat(parts, dtype)
+
+
+def _preprocessing(steps, user_dtype, n_features) -> Tuple[Columns, list]:
+    """The columns the final estimator sees: for each, its input column and the exact
+    arithmetic of every step on the way, calibrated against the installed scikit-learn."""
     desc: list = []
     D = np.dtype(user_dtype) if np.dtype(user_dtype) in (np.dtype(np.float32), np.dtype(np.float64)) \
         else np.dtype(np.float64)
+    cols = Columns(n_features, D)
     for name, tr in steps:
-        if tr is None or tr == "passthrough":
+        if _is_identity(tr):
             continue
         cls = type(tr).__name__
-        ops = []
-        if cls == "StandardScaler":
-            if getattr(tr, "with_mean", True) and tr.mean_ is not None:
-                ops.append(("sub", np.asarray(tr.mean_, np.float64)))
-            if getattr(tr, "with_std", True) and tr.scale_ is not None:
-                ops.append(("div", np.asarray(tr.scale_, np.float64)))
-        elif cls == "MinMaxScaler":
-            if getattr(tr, "clip", False):
-                raise UnsupportedModelError("MinMaxScaler(clip=True) is not supported yet")
-            ops = [("mul", np.asarray(tr.scale_, np.float64)), ("add", np.asarray(tr.min_, np.float64))]
-        elif cls == "MaxAbsScaler":
-            ops = [("div", np.asarray(tr.scale_, np.float64))]
-        elif cls == "RobustScaler":
-            if getattr(tr, "with_centering", True) and tr.center_ is not None:
-                ops.append(("sub", np.asarray(tr.center_, np.float64)))
-            if getattr(tr, "with_scaling", True) and tr.scale_ is not None:
-                ops.append(("div", np.asarray(tr.scale_, np.float64)))
+        if cls == "ColumnTransformer":
+            cols = _column_transformer(name, tr, cols, D)
         elif cls == "CastTransformer":
             D = np.dtype(getattr(tr, "dtype", np.float32))
-            out += [("cast", None, D)]
-            desc.append(cls)
-            continue
+            cols.apply([("cast", None, D)])
+        elif cls in _SCALERS:
+            cols.apply(_calibrated(tr, D, cols.n))
         else:
-            raise UnsupportedModelError(
-                f"pipeline step '{name}' ({cls}) is not supported: only per-feature monotone "
-                "scalers (StandardScaler, MinMaxScaler, MaxAbsScaler, RobustScaler, CastTransformer) "
-                "can be analysed exactly")
-        if ops:
-            out += _calibrate(tr, _step_variants(ops, D), D, n_features)
+            raise UnsupportedModelError(f"pipeline step '{name}' ({cls}) is not supported: {_ONLY}")
         desc.append(cls)
-    return out, desc
+    return cols, desc
+
+
+def _verify_preprocessing(steps, cols: Columns, chain: Chain, user_dtype, n_features, with_nan) -> None:
+    """The modelled preprocessing must reproduce the real transform steps bit for bit,
+    column by column, on values of every magnitude, signed zeros and missing values."""
+    if cols.is_identity():
+        return
+    rng = np.random.default_rng(54321)
+    n = 4096
+    X = rng.normal(size=(n, n_features)) * rng.choice([1e-30, 1e-3, 1.0, 1e3, 1e8, 1e30], size=(n, n_features))
+    special = rng.random(X.shape)
+    X[special < 0.04] = 0.0
+    X[(special >= 0.04) & (special < 0.08)] = -0.0
+    if with_nan:
+        X[special > 0.95] = np.nan
+    X = X.astype(user_dtype)
+    ref = X
+    try:
+        for _, tr in steps:
+            if not _is_identity(tr):
+                ref = tr.transform(ref)
+    except Exception as exc:
+        raise UnsupportedModelError(f"cannot run the Pipeline's transform steps on a numeric array: {exc}")
+    ref = np.asarray(ref)
+    rows = np.arange(n)
+    got = np.stack([chain.apply(X[rows, cols.src[k]], np.full(n, k)) for k in range(cols.n)], axis=1)
+    if ref.shape != got.shape or ref.dtype != got.dtype or not np.array_equal(ref, got, equal_nan=True):
+        raise UnsupportedModelError(
+            "the Pipeline's preprocessing could not be reproduced bit for bit with this "
+            "scikit-learn version, so it cannot be analysed exactly")
 
 
 def _tree_arrays(tree_):
@@ -98,6 +207,52 @@ def _tree_arrays(tree_):
     return children, feature, thr, mgl, is_leaf
 
 
+class _Pre:
+    def __init__(self, columns: Columns, chain: Chain, desc: list):
+        self.columns, self.chain, self.desc = columns, chain, desc
+
+
+def _pipeline_chain(steps, user_dtype, n_features, accepts_nan) -> _Pre:
+    cols, desc = _preprocessing(steps, user_dtype, n_features)
+    chain = cols.to_chain()
+    D0 = np.dtype(user_dtype) if np.dtype(user_dtype) in (np.dtype(np.float32), np.dtype(np.float64)) \
+        else np.dtype(np.float64)
+    _verify_preprocessing(steps, cols, chain, D0, n_features, accepts_nan)
+    return _Pre(cols, chain, desc)
+
+
+def _load_booster_pipeline(pipeline, est, steps, user_dtype) -> Model:
+    """A Pipeline whose last step is an XGBoost or LightGBM estimator (scikit-learn API):
+    the booster's own model, with the Pipeline's preprocessing in front of its routing."""
+    if type(est).__module__.startswith("xgboost"):
+        from .xgboost_loader import load_xgboost as load
+    else:
+        from .lightgbm_loader import load_lightgbm as load
+    try:
+        m = load(est, user_dtype)
+    except UnsupportedModelError as exc:
+        raise UnsupportedModelError(
+            f"pipeline step '{pipeline.steps[-1][0]}' ({type(est).__name__}): {exc}") from exc
+    n_features = int(getattr(pipeline, "n_features_in_", 0) or m.n_features)
+    accepts_nan = _accepts(pipeline, n_features, np.nan)
+    pre = _pipeline_chain(steps, user_dtype, n_features, accepts_nan)
+    m.router.chain = pre.chain.then(m.router.chain)
+    m.pipeline = pipeline  # the real runtime: Pipeline transforms, then the booster
+    if pre.columns.src == list(range(pre.columns.n)):
+        m.n_features = n_features
+    else:
+        m.map_columns_to_inputs(pre.columns.src, n_features)
+    names = getattr(pipeline, "feature_names_in_", None)
+    m.feature_names = [str(x) for x in names] if names is not None else None
+    m.accepts_nan = m.accepts_nan and accepts_nan
+    m.accepts_inf = m.accepts_inf and _accepts(pipeline, n_features, np.inf)
+    pre_desc = pre.desc
+    m.description = "scikit-learn Pipeline: " + " -> ".join(pre_desc + [m.description])
+    if pre_desc:
+        m.notes.append("preprocessing modelled exactly: " + ", ".join(pre_desc))
+    return m
+
+
 def load_sklearn(obj: Any, user_dtype=np.float64) -> Model:
     pipeline = obj
     steps = []
@@ -105,9 +260,14 @@ def load_sklearn(obj: Any, user_dtype=np.float64) -> Model:
     if hasattr(obj, "steps"):
         steps = obj.steps[:-1]
         est = obj.steps[-1][1]
+        if type(est).__module__.startswith(("xgboost", "lightgbm")):
+            return _load_booster_pipeline(obj, est, steps, user_dtype)
     cls = type(est).__name__
-    pre, pre_desc = _preprocessing_steps(steps, user_dtype, int(getattr(obj, 'n_features_in_', 0) or getattr(est, 'n_features_in_', 0)))
-    chain = Chain(pre + [("cast", None, np.float32)])
+    n_inputs = int(getattr(obj, 'n_features_in_', 0) or getattr(est, 'n_features_in_', 0))
+    accepts_nan = _accepts(pipeline, n_inputs, np.nan)
+    pre = _pipeline_chain(steps, user_dtype, n_inputs, accepts_nan)
+    pre_desc = pre.desc
+    chain = pre.chain.then(Chain([("cast", None, np.float32)]))
 
     is_clf = hasattr(est, "classes_")
     base = None
@@ -124,6 +284,10 @@ def load_sklearn(obj: Any, user_dtype=np.float64) -> Model:
         scale = 1.0 / len(members)
     elif cls in ("GradientBoostingRegressor", "GradientBoostingClassifier"):
         members = None
+    elif hasattr(obj, "steps"):
+        raise UnsupportedModelError(
+            f"pipeline step '{obj.steps[-1][0]}' ({cls}) is not supported as the final estimator: "
+            "use a scikit-learn tree model, XGBoost or LightGBM")
     else:
         raise UnsupportedModelError(f"scikit-learn estimator {cls} is not supported yet")
 
@@ -196,8 +360,10 @@ def load_sklearn(obj: Any, user_dtype=np.float64) -> Model:
               base=np.asarray(base, dtype=np.float64), router=router,
               description=f"scikit-learn {desc}, {len(trees)} trees",
               feature_names=[str(x) for x in names] if names is not None else None,
-              accepts_nan=_accepts(pipeline, n_features, np.nan), accepts_inf=False,
+              accepts_nan=accepts_nan, accepts_inf=False,
               accumulate_dtype=np.float64, raw_meaning=raw_meaning, source=pipeline)
+    if pre.columns.src != list(range(pre.columns.n)):
+        m.map_columns_to_inputs(pre.columns.src, n_features)
     if pre_desc:
         m.notes.append("preprocessing modelled exactly: " + ", ".join(pre_desc))
     return m
