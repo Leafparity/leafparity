@@ -104,9 +104,31 @@ def sk_models():
     return out
 
 
+def booster_pipeline_models():
+    """XGBoost / LightGBM (scikit-learn API) behind a scaler, converted by skl2onnx with the
+    onnxmltools converters registered."""
+    from lightgbm import LGBMClassifier
+    from skl2onnx import to_onnx
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import RobustScaler, StandardScaler
+    from xgboost import XGBClassifier
+    from test_pipelines import register_booster_converters
+    register_booster_converters()
+    X, Xn, y, yb, ym = data()
+    x32 = X[:1].astype(np.float32)
+    out = []
+    for name, sc, est in (("xgb", StandardScaler(), XGBClassifier(n_estimators=15, max_depth=3)),
+                          ("lgb", RobustScaler(), LGBMClassifier(n_estimators=15, num_leaves=7, verbose=-1))):
+        p = Pipeline([("scaler", sc), ("model", est)]).fit(Xn, yb)
+        out.append((f"pipe_{name}_{type(sc).__name__}", p,
+                    to_onnx(p, x32, options={id(est): {"zipmap": False}},
+                            target_opset={"": 15, "ai.onnx.ml": 3})))
+    return out
+
+
 @functools.lru_cache(maxsize=None)
 def all_models():
-    return tuple(xgb_models() + lgb_models() + sk_models())
+    return tuple(xgb_models() + lgb_models() + sk_models() + booster_pipeline_models())
 
 
 def by_name(name):

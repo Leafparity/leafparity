@@ -15,13 +15,28 @@ from .ir import Model, UnsupportedModelError
 
 
 # =========================================================================== originals
+def _booster_input(model: Model, X: np.ndarray) -> np.ndarray:
+    """What an XGBoost / LightGBM model inside a scikit-learn Pipeline receives: X after
+    every transform step, exactly as Pipeline.predict computes it."""
+    pipeline = getattr(model, "pipeline", None)
+    if pipeline is None:
+        return X
+    for _, tr in pipeline.steps[:-1]:
+        if tr is None or tr == "passthrough":
+            continue
+        X = tr.transform(X)
+    return X
+
+
 def leaf_indices(model: Model, X: np.ndarray) -> np.ndarray:
     """Leaf reached in every tree, as local node indices of ``model.trees[t]``."""
     if model.library == "xgboost":
         import xgboost as xgb
+        X = _booster_input(model, X)
         out = model.source.predict(xgb.DMatrix(X, missing=np.nan), pred_leaf=True)
         return np.asarray(out, dtype=np.int64).reshape(X.shape[0], -1)
     if model.library == "lightgbm":
+        X = _booster_input(model, X)
         out = np.asarray(model.source.predict(X, pred_leaf=True), dtype=np.int64).reshape(X.shape[0], -1)
         res = np.empty_like(out)
         for t, tree in enumerate(model.trees):
@@ -42,9 +57,11 @@ def raw_outputs(model: Model, X: np.ndarray) -> np.ndarray:
     n = X.shape[0]
     if model.library == "xgboost":
         import xgboost as xgb
+        X = _booster_input(model, X)
         out = model.source.predict(xgb.DMatrix(X, missing=np.nan), output_margin=True)
         return np.asarray(out, dtype=np.float64).reshape(n, -1)
     if model.library == "lightgbm":
+        X = _booster_input(model, X)
         out = np.asarray(model.source.predict(X, raw_score=True), dtype=np.float64).reshape(n, -1)
         div = getattr(model, "lgb_average_divisor", None)
         return out / div if div else out
@@ -67,6 +84,12 @@ def raw_outputs(model: Model, X: np.ndarray) -> np.ndarray:
 def final_outputs(model: Model, X: np.ndarray) -> Dict[str, np.ndarray]:
     """What an application actually consumes: predictions / probabilities / labels."""
     n = X.shape[0]
+    pipeline = getattr(model, "pipeline", None)
+    if pipeline is not None:  # XGBoost / LightGBM inside a Pipeline: ask the Pipeline itself
+        if model.task in ("binary", "multiclass"):
+            p = np.asarray(pipeline.predict_proba(X), dtype=np.float64)
+            return {"probability": p, "label": p.argmax(axis=1)}
+        return {"prediction": np.asarray(pipeline.predict(X), dtype=np.float64).reshape(n, -1)}
     if model.library == "xgboost":
         import xgboost as xgb
         out = np.asarray(model.source.predict(xgb.DMatrix(X, missing=np.nan)), dtype=np.float64)

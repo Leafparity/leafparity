@@ -22,6 +22,10 @@ def _have(*modules):
 
 needs_sklearn = pytest.mark.skipif(not _have("sklearn", "skl2onnx", "joblib"),
                                    reason="needs scikit-learn, skl2onnx and joblib")
+needs_xgboost = pytest.mark.skipif(not _have("sklearn", "skl2onnx", "joblib", "xgboost", "onnxmltools"),
+                                   reason="needs xgboost, onnxmltools and skl2onnx")
+needs_lightgbm = pytest.mark.skipif(not _have("sklearn", "skl2onnx", "joblib", "lightgbm", "onnxmltools"),
+                                    reason="needs lightgbm, onnxmltools and skl2onnx")
 
 EXE = [sys.executable, "-m", "leafparity.cli", "check"]
 
@@ -35,8 +39,26 @@ def _data(seed=0, n=1500, nan_frac=0.05):
     return X, Xn, y
 
 
+def register_booster_converters():
+    """Let skl2onnx convert XGBoost / LightGBM steps with onnxmltools, the documented way."""
+    from skl2onnx import update_registered_converter
+    from skl2onnx.common.shape_calculator import calculate_linear_classifier_output_shapes
+    options = {"nocl": [True, False], "zipmap": [True, False, "columns"]}
+    if _have("xgboost"):
+        from onnxmltools.convert.xgboost.operator_converters.XGBoost import convert_xgboost
+        from xgboost import XGBClassifier
+        update_registered_converter(XGBClassifier, "XGBoostXGBClassifier",
+                                    calculate_linear_classifier_output_shapes, convert_xgboost, options=options)
+    if _have("lightgbm"):
+        from lightgbm import LGBMClassifier
+        from onnxmltools.convert.lightgbm.operator_converters.LightGbm import convert_lightgbm
+        update_registered_converter(LGBMClassifier, "LightGbmLGBMClassifier",
+                                    calculate_linear_classifier_output_shapes, convert_lightgbm, options=options)
+
+
 def _to_onnx(pipeline, X):
     from skl2onnx import to_onnx
+    register_booster_converters()
     last = pipeline.steps[-1][1]
     options = {id(last): {"zipmap": False}} if hasattr(last, "classes_") else None
     return to_onnx(pipeline, np.asarray(X[:1], dtype=np.float32), options=options,
@@ -234,3 +256,44 @@ def test_equivalent_pipeline_brute_force_around_every_threshold(tmp_path):
     r = subprocess.run(EXE + [str(tmp_path / "p.pkl"), str(tmp_path / "p.onnx"), "--input-dtype",
                               "float32", "--no-missing", "--quiet"], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+# --------------------------------------------------------------------------- XGBoost / LightGBM
+def _booster(library):
+    if library == "xgboost":
+        from xgboost import XGBClassifier
+        return XGBClassifier(n_estimators=12, max_depth=3)
+    from lightgbm import LGBMClassifier
+    return LGBMClassifier(n_estimators=12, num_leaves=7, verbose=-1)
+
+
+@pytest.mark.parametrize("udt", ["float64", "float32"])
+@pytest.mark.parametrize("library", [pytest.param("xgboost", marks=needs_xgboost),
+                                     pytest.param("lightgbm", marks=needs_lightgbm)])
+def test_booster_behind_standard_scaler(library, udt):
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+    X, Xn, y = _data()
+    p = Pipeline([("scaler", StandardScaler()), ("model", _booster(library))]).fit(Xn, y)
+    onx = _to_onnx(p, X)
+    a = analyze(p, onx, input_dtype=udt, background=Xn[:300])
+    assert a.original.library == library
+    assert "StandardScaler" in a.original.description
+    assert_exact_against_real_runtimes(a, p, onx, udt)
+
+
+@pytest.mark.parametrize("library", [pytest.param("xgboost", marks=needs_xgboost),
+                                     pytest.param("lightgbm", marks=needs_lightgbm)])
+def test_booster_pipeline_from_the_command_line(library, tmp_path):
+    import joblib
+    import onnx
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import MinMaxScaler
+    X, Xn, y = _data(seed=1)
+    p = Pipeline([("scaler", MinMaxScaler()), ("model", _booster(library))]).fit(Xn, y)
+    joblib.dump(p, tmp_path / "p.joblib")
+    onnx.save(_to_onnx(p, X), str(tmp_path / "p.onnx"))
+    a = analyze(str(tmp_path / "p.joblib"), str(tmp_path / "p.onnx"))
+    r = subprocess.run(EXE + [str(tmp_path / "p.joblib"), str(tmp_path / "p.onnx"), "--quiet"],
+                       capture_output=True, text=True)
+    assert r.returncode == {"EQUIVALENT": 0, "NOT EQUIVALENT": 1}[a.verdict["status"]], r.stdout + r.stderr

@@ -98,6 +98,29 @@ def _tree_arrays(tree_):
     return children, feature, thr, mgl, is_leaf
 
 
+def _load_booster_pipeline(pipeline, est, steps, user_dtype) -> Model:
+    """A Pipeline whose last step is an XGBoost or LightGBM estimator (scikit-learn API):
+    the booster's own model, with the Pipeline's preprocessing in front of its routing."""
+    if type(est).__module__.startswith("xgboost"):
+        from .xgboost_loader import load_xgboost as load
+    else:
+        from .lightgbm_loader import load_lightgbm as load
+    m = load(est, user_dtype)
+    n_features = int(getattr(pipeline, "n_features_in_", 0) or m.n_features)
+    pre, pre_desc = _preprocessing_steps(steps, user_dtype, n_features)
+    m.router.chain = Chain(pre).then(m.router.chain)
+    m.pipeline = pipeline  # the real runtime: Pipeline transforms, then the booster
+    m.n_features = n_features
+    names = getattr(pipeline, "feature_names_in_", None)
+    m.feature_names = [str(x) for x in names] if names is not None else None
+    m.accepts_nan = m.accepts_nan and _accepts(pipeline, n_features, np.nan)
+    m.accepts_inf = m.accepts_inf and _accepts(pipeline, n_features, np.inf)
+    m.description = "scikit-learn Pipeline: " + " -> ".join(pre_desc + [m.description])
+    if pre_desc:
+        m.notes.append("preprocessing modelled exactly: " + ", ".join(pre_desc))
+    return m
+
+
 def load_sklearn(obj: Any, user_dtype=np.float64) -> Model:
     pipeline = obj
     steps = []
@@ -105,6 +128,8 @@ def load_sklearn(obj: Any, user_dtype=np.float64) -> Model:
     if hasattr(obj, "steps"):
         steps = obj.steps[:-1]
         est = obj.steps[-1][1]
+        if type(est).__module__.startswith(("xgboost", "lightgbm")):
+            return _load_booster_pipeline(obj, est, steps, user_dtype)
     cls = type(est).__name__
     pre, pre_desc = _preprocessing_steps(steps, user_dtype, int(getattr(obj, 'n_features_in_', 0) or getattr(est, 'n_features_in_', 0)))
     chain = Chain(pre + [("cast", None, np.float32)])
