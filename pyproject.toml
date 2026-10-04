@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "leafparity"
-version = "0.1.1"
+version = "0.1.2"
 description = "Exact equivalence checking for tree-ensemble models converted to ONNX: finds every input where the deployed model disagrees with the original, and proves the rest."
 readme = "README.md"
 requires-python = ">=3.9"
