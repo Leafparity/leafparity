@@ -97,6 +97,10 @@ def sk_models():
     for sc in (StandardScaler(), MinMaxScaler(), RobustScaler(), MaxAbsScaler()):
         p = Pipeline([("s", sc), ("dt", DecisionTreeRegressor(max_depth=7, random_state=0))]).fit(X, y)
         out.append((f"sk_pipe_{type(sc).__name__}", p, to_onnx(p, x32)))
+    for sc in (StandardScaler(), MinMaxScaler(), RobustScaler()):
+        p = Pipeline([("scaler", sc), ("model", RandomForestClassifier(6, max_depth=5, random_state=0))])
+        p.fit(Xn, yb)
+        out.append((f"sk_pipe_rf_{type(sc).__name__}", p, to_onnx(p, x32, options=nz(p.steps[-1][1]))))
     return out
 
 
