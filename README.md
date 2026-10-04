@@ -80,6 +80,7 @@ leafparity check ORIGINAL CONVERTED.onnx [options]
 | `--bounds bounds.json` | Restrict the domain, for example `{"age": [0, 120], "3": [0, null]}`. |
 | `--background sample.csv` | A sample of real inputs. It gives features their names and makes witness inputs realistic. |
 | `--json report.json` | Machine-readable report with every finding. |
+| `--summary` | Print, and write with `--json`, only the verdict-level summary. See [Sharing a result without revealing the model](#sharing-a-result-without-revealing-the-model). |
 | `--fail-above X` | CI gate: fail only if the proven maximum raw difference exceeds `X`. |
 | `--worst-case-seconds S` | Time budget for tightening the worst-case bound (default 30). |
 
@@ -96,7 +97,37 @@ result = analyze(lgbm_model, "model.onnx", background=X_sample)
 print(result.verdict["status"])     # 'EQUIVALENT' / 'NOT EQUIVALENT'
 print(to_text(result))
 result.to_dict()                    # everything, JSON-serialisable
+result.to_summary_dict()            # verdict-level facts only, see below
 ```
+
+## Sharing a result without revealing the model
+
+The full report prints split thresholds, feature names and witness inputs, so it
+reveals parts of the model. With `--summary` the model owner runs the check and
+sends only the verdict:
+
+```
+$ leafparity check model.txt model.onnx --summary --json verdict.json
+
+leafparity 0.1.0 - summary (model details withheld)
+VERDICT: NOT EQUIVALENT
+  Scope                         : every float64 input vector, including missing values (NaN)
+  Distinct problems             : 4
+  Kinds of problems             : zero value routing (2), threshold rounding to lower precision (2)
+  Predicted class can change    : not applicable (regression model)
+  Largest raw output difference : 295.027 (proven to be the largest possible)
+  Examined                      : 30 trees, 4 features, 2327 joint regions
+  Run time                      : 4.0 s
+```
+
+*(The model from `examples/02_lightgbm_zero_as_missing.py`, saved to files.)*
+
+The summary never contains a threshold, a feature name or index, a witness input,
+a leaf value, a node id or rule text. This applies to the printed output and to
+`verdict.json`, which carries the same facts in a reduced schema of its own. When
+the pair cannot be certified, the verdict is `CANNOT CERTIFY` with a general reason;
+run again without `--summary` to see the details. Exit codes are the same as
+without `--summary`.
 
 ## Why you can trust the verdict
 

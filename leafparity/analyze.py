@@ -43,6 +43,11 @@ class Analysis:
         from .report import analysis_to_dict
         return analysis_to_dict(self)
 
+    def to_summary_dict(self) -> Dict[str, Any]:
+        """Verdict-level facts only, safe to share without revealing the model."""
+        from .report import summary_dict
+        return summary_dict(self)
+
 
 # --------------------------------------------------------------------------- helpers
 def _fmt(v) -> str:
@@ -352,6 +357,11 @@ def analyze(original: Any, converted: Any, *, input_dtype="float64", allow_missi
     fmax = max([abs(w["max_found"]) for w in worst] + [0.0])
     label_flip = any(f.get("witness", {}).get("label_changed") for f in findings) or \
         any(w.get("witness", {}).get("label_changed") for w in worst)
+    # the largest difference found is proven to be the largest possible (up to rounding)
+    tight = (gmax + acc) <= fmax * 1.001 + acc
+    problem_kinds: Dict[str, int] = {}
+    for pb in ordered:
+        problem_kinds[pb["pattern"]] = problem_kinds.get(pb["pattern"], 0) + 1
     if inconsistent or not within:
         status = "INCONCLUSIVE"
         headline = ("Internal consistency check failed - do not rely on this report; "
@@ -369,7 +379,6 @@ def analyze(original: Any, converted: Any, *, input_dtype="float64", allow_missi
     else:
         status = "NOT EQUIVALENT"
         n_occ = sum(pb["n_occurrences"] for pb in groups.values())
-        tight = (gmax + acc) <= fmax * 1.001 + acc
         bound_txt = ("proven to be the largest possible difference" if tight else
                      f"proven upper bound for any input: {gmax + acc:.6g}")
         headline = (f"Not equivalent: {len(groups)} distinct problem(s) at {n_occ} place(s) in the trees. "
@@ -377,7 +386,8 @@ def analyze(original: Any, converted: Any, *, input_dtype="float64", allow_missi
                     + ("; the predicted class changes for at least one input." if label_flip else "."))
     verdict = {"status": status, "headline": headline, "max_raw_difference_found": fmax,
                "max_raw_difference_guaranteed": gmax + acc, "rounding_allowance": acc,
-               "distinct_problems": len(groups),
+               "max_raw_difference_is_proven_maximum": bool(tight),
+               "distinct_problems": len(groups), "problem_kinds": problem_kinds,
                "places_in_trees": int(sum(pb["n_occurrences"] for pb in groups.values())),
                "label_flip_found": bool(label_flip),
                "worst_case_proven": all(w["proven"] for w in worst)}

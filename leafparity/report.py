@@ -175,3 +175,130 @@ def _short_input(inp: Dict[str, str], focus=None, limit: int = 8) -> str:
 def _wrap(s: str, width: int) -> str:
     import textwrap
     return "\n".join(textwrap.wrap(s, width=width, subsequent_indent="    ")) or s
+
+
+# --------------------------------------------------------------------------- summary
+# The summary carries only verdict-level facts, so a result can be shared without revealing
+# the model: no threshold, feature name or index, input value, leaf value, node id or rule
+# text. The text form is rendered from the summary dict alone, never from the analysis.
+
+_KIND_WORDS = {
+    "missing": "NaN routing",
+    "zero": "zero value routing",
+    "precision": "threshold rounding to lower precision",
+    "threshold": "different split threshold",
+    "value": "different leaf value",
+    "unmatched": "different tree structure",
+}
+
+_CLASS_CHANGE_TEXT = {
+    "yes": "yes, an input verified on both real runtimes changes it",
+    "not found": "not found on any verified input (not proven impossible)",
+    "no": "no, the outputs differ only by floating-point rounding",
+    "not applicable": "not applicable (regression model)",
+}
+
+
+def _empty_summary(verdict: str, seconds: float) -> Dict[str, Any]:
+    return {"tool": "leafparity", "version": __version__, "report": "summary", "verdict": verdict,
+            "reason": None, "scope": None, "distinct_problems": None, "problem_kinds": None,
+            "class_can_change": None, "max_raw_difference_found": None,
+            "max_raw_difference_upper_bound": None, "max_raw_difference_is_proven_maximum": None,
+            "trees_original": None, "trees_converted": None, "features": None,
+            "joint_regions_examined": None, "run_seconds": round(float(seconds), 1)}
+
+
+def _scope(dom) -> Dict[str, Any]:
+    from .engine import F32_MAX
+    fk = dom.fk
+    m = fk.dtype.type(F32_MAX)
+    whole = ((fk.key(-m), fk.key(m)), (fk.key_min, fk.key_max))
+    ranges = list(zip(dom.lo, dom.hi))
+    return {"input_dtype": fk.dtype.name, "missing_values": bool(any(dom.nan)),
+            "infinity": any(lo == fk.key_min or hi == fk.key_max for lo, hi in ranges),
+            "bounded": any(r not in whole for r in ranges)}
+
+
+def summary_dict(a) -> Dict[str, Any]:
+    """The verdict-level summary of an analysis, safe to share without revealing the model."""
+    v = a.verdict
+    status = v["status"]
+    certified = status in ("EQUIVALENT", "NOT EQUIVALENT")
+    d = _empty_summary(status if certified else "CANNOT CERTIFY", a.timings.get("total", 0.0))
+    d.update({"scope": _scope(a.domain), "trees_original": len(a.original.trees),
+              "trees_converted": len(a.converted.trees), "features": int(a.domain.n_features),
+              "joint_regions_examined": int(a.static["joint_regions_examined"])})
+    if not certified:
+        d["reason"] = "internal consistency check failed"
+        return d
+    if a.original.task == "regression":
+        change = "not applicable"
+    elif v["label_flip_found"]:
+        change = "yes"
+    else:
+        change = "no" if status == "EQUIVALENT" else "not found"
+    d.update({"distinct_problems": int(v["distinct_problems"]),
+              "problem_kinds": [{"kind": _KIND_WORDS.get(p, p), "problems": int(n)}
+                                for p, n in v["problem_kinds"].items()],
+              "class_can_change": change,
+              "max_raw_difference_found": float(v["max_raw_difference_found"]),
+              "max_raw_difference_upper_bound": float(v["max_raw_difference_guaranteed"]),
+              "max_raw_difference_is_proven_maximum": bool(v["max_raw_difference_is_proven_maximum"])})
+    return d
+
+
+def cannot_certify_summary(reason: str, seconds: float) -> Dict[str, Any]:
+    """Summary for a model pair that could not be analysed at all."""
+    d = _empty_summary("CANNOT CERTIFY", seconds)
+    d["reason"] = reason
+    return d
+
+
+def summary_json(d: Dict[str, Any], indent: int = 2) -> str:
+    return json.dumps(d, indent=indent)
+
+
+def summary_text(d: Dict[str, Any]) -> str:
+    rows = []
+    if d["reason"]:
+        rows.append(("Reason", d["reason"]))
+    sc = d["scope"]
+    if sc:
+        scope = f"every {sc['input_dtype']} input vector, " + \
+            ("including missing values (NaN)" if sc["missing_values"] else "no missing values")
+        if sc["infinity"]:
+            scope += ", including +/-infinity"
+        if sc["bounded"]:
+            scope += ", within the given bounds"
+        rows.append(("Scope", scope))
+    if d["distinct_problems"] is not None:
+        rows.append(("Distinct problems", str(d["distinct_problems"])))
+        rows.append(("Kinds of problems",
+                     ", ".join(f"{k['kind']} ({k['problems']})" for k in d["problem_kinds"]) or "none"))
+    if d["class_can_change"]:
+        rows.append(("Predicted class can change", _CLASS_CHANGE_TEXT[d["class_can_change"]]))
+    if d["max_raw_difference_found"] is not None:
+        found, bound = d["max_raw_difference_found"], d["max_raw_difference_upper_bound"]
+        if d["verdict"] == "EQUIVALENT":
+            diff = f"at most {_g(bound)} (proven; floating-point rounding only)"
+        elif d["max_raw_difference_is_proven_maximum"]:
+            diff = f"{_g(found)} (proven to be the largest possible)"
+        else:
+            diff = (f"{_g(found)} found; at most {_g(bound)} for any input (proven upper bound, "
+                    "the exact maximum is not proven)")
+        rows.append(("Largest raw output difference", diff))
+    if d["trees_original"] is not None:
+        trees = f"{d['trees_original']} trees"
+        if d["trees_converted"] != d["trees_original"]:
+            trees += f" ({d['trees_converted']} in the converted model)"
+        rows.append(("Examined", f"{trees}, {d['features']} features, "
+                                 f"{d['joint_regions_examined']} joint regions"))
+    rows.append(("Run time", f"{d['run_seconds']:.1f} s"))
+    import textwrap
+    width = max(len(k) for k, _ in rows)
+    L = [f"leafparity {d['version']} - summary (model details withheld)", f"VERDICT: {d['verdict']}"]
+    for k, val in rows:
+        head = f"  {k:<{width}} : "
+        L.append("\n".join(textwrap.wrap(val, width=100, initial_indent=head,
+                                         subsequent_indent=" " * len(head))))
+    return "\n".join(L)
