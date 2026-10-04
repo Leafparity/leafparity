@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -80,14 +81,41 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--bounds", help="JSON file {feature: [min, max]} restricting the analysed domain")
     c.add_argument("--background", help="sample of real inputs (.csv/.npy/.parquet) used to make "
                                         "witness inputs realistic and to name features")
-    c.add_argument("--json", dest="json_out", help="also write the full machine-readable report here")
+    c.add_argument("--json", dest="json_out", help="also write the full machine-readable report here "
+                                                   "(only the summary with --summary)")
     c.add_argument("--max-findings", type=int, default=25)
     c.add_argument("--worst-case-seconds", type=float, default=30.0,
                    help="time budget for tightening the worst-case bound (default 30)")
     c.add_argument("--fail-above", type=float, default=None,
                    help="CI gate: exit 1 only if the proven max raw difference exceeds this value")
     c.add_argument("--quiet", action="store_true", help="print only the verdict line")
+    c.add_argument("--summary", action="store_true",
+                   help="print, and write with --json, only the verdict, the number and kinds of "
+                        "problems, the largest raw difference and what was examined; no thresholds, "
+                        "feature names, input values, leaf values, node ids or rules, so the result "
+                        "can be shared without revealing the model")
     return p
+
+
+def _cannot_certify_reason(exc: Exception) -> str:
+    from .analyze import SelfCheckError
+    from .ir import UnsupportedModelError
+    if isinstance(exc, UnsupportedModelError):
+        return "the model pair uses a construct leafparity does not support"
+    if isinstance(exc, SelfCheckError):
+        return "self-check failed: leafparity's exact model disagreed with a real runtime"
+    return "invalid input or options"
+
+
+def _emit_summary(args, d) -> None:
+    from .report import summary_json, summary_text
+    if args.json_out:
+        with open(args.json_out, "w", encoding="utf-8") as fh:
+            fh.write(summary_json(d))
+    print(d["verdict"] if args.quiet else summary_text(d))
+    if d["verdict"] == "CANNOT CERTIFY":
+        print("leafparity: run again without --summary to see why (the details may reveal the model)",
+              file=sys.stderr)
 
 
 def main(argv=None) -> int:
@@ -96,8 +124,9 @@ def main(argv=None) -> int:
         return 2
     from .analyze import SelfCheckError, analyze
     from .ir import UnsupportedModelError
-    from .report import to_json, to_text
+    from .report import cannot_certify_summary, summary_dict, to_json, to_text
     bg, names = _load_background(args.background)
+    t0 = time.time()
     try:
         bounds = _parse_bounds(args.bounds, names)
         a = analyze(args.original, args.converted, input_dtype=args.input_dtype,
@@ -105,15 +134,21 @@ def main(argv=None) -> int:
                     bounds=bounds, background=bg, feature_names=names,
                     max_findings=args.max_findings, worst_case_seconds=args.worst_case_seconds)
     except (UnsupportedModelError, SelfCheckError, ValueError) as exc:
-        print(f"leafparity: cannot certify this model pair: {exc}", file=sys.stderr)
+        if args.summary:  # the message itself may name model details
+            _emit_summary(args, cannot_certify_summary(_cannot_certify_reason(exc), time.time() - t0))
+        else:
+            print(f"leafparity: cannot certify this model pair: {exc}", file=sys.stderr)
         return 2
-    if args.json_out:
-        with open(args.json_out, "w", encoding="utf-8") as fh:
-            fh.write(to_json(a))
-    if args.quiet:
-        print(f"{a.verdict['status']}: {a.verdict['headline']}")
+    if args.summary:
+        _emit_summary(args, summary_dict(a))
     else:
-        print(to_text(a))
+        if args.json_out:
+            with open(args.json_out, "w", encoding="utf-8") as fh:
+                fh.write(to_json(a))
+        if args.quiet:
+            print(f"{a.verdict['status']}: {a.verdict['headline']}")
+        else:
+            print(to_text(a))
     status = a.verdict["status"]
     if status == "EQUIVALENT":
         return 0
