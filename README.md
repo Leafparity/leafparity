@@ -48,7 +48,7 @@ Not equivalent: 4 distinct problem(s) at 699 place(s) in the trees. For some
 |---|---|
 | The sklearn-onnx documentation's own "Issues when switching to float" example (StandardScaler + DecisionTreeRegressor) | The tutorial's test set shows a largest error of about 156. leafparity proves the largest possible error is **556** (721 with missing values), shows where each discrepancy is, and certifies the tutorial's `CastTransformer` fix as **EQUIVALENT** for float32 inputs without NaN. It also shows the fix does *not* hold for float64 inputs. |
 | LightGBM trained with `zero_as_missing=True`, converted with onnxmltools | The converter ignores LightGBM's `missing_type=Zero`, so an input of exactly `0.0` takes a different path in every tree. Raw scores differ by up to ~295. |
-| scikit-learn trees (>= 1.3) that receive NaN, converted with skl2onnx | scikit-learn routes NaN with `missing_go_to_left`, but the converted model sends NaN the other way at the affected nodes. |
+| scikit-learn trees (>= 1.3) that receive NaN, converted with skl2onnx 1.20.0 from PyPI | scikit-learn routes NaN with `missing_go_to_left`, but the converted model sends NaN the other way at the affected nodes. **Update 2026-10-07:** this is fixed on the skl2onnx main branch (pull request 1254, 1.21.0 development version) and is not in a PyPI release yet. With skl2onnx built from main, the 11 trees and forests we rechecked are proven EQUIVALENT with NaN allowed. |
 | LightGBM (double thresholds) served through float32 ONNX | Narrow bands of float64 inputs next to thresholds are routed differently at almost every node. leafparity lists them and bounds their effect. With `--input-dtype float32` it tells you whether your float32 data can hit them at all. |
 
 ## Install
